@@ -20,13 +20,12 @@ import com.arkivanov.decompose.ComponentContext
 import com.arkivanov.essenty.instancekeeper.InstanceKeeper
 import com.arkivanov.essenty.instancekeeper.getOrCreate
 import com.arkivanov.essenty.lifecycle.doOnCreate
-import dev.sasikanth.rss.reader.core.model.local.PostsType
 import dev.sasikanth.rss.reader.data.repository.ObservableActiveSource
 import dev.sasikanth.rss.reader.data.repository.RssRepository
 import dev.sasikanth.rss.reader.data.repository.SettingsRepository
+import dev.sasikanth.rss.reader.data.time.LastRefreshedAt
+import dev.sasikanth.rss.reader.posts.PostsFilterUtils
 import dev.sasikanth.rss.reader.util.DispatchersProvider
-import dev.sasikanth.rss.reader.utils.getLast24HourStart
-import dev.sasikanth.rss.reader.utils.getTodayStartInstant
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -42,7 +41,8 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import kotlinx.datetime.Instant
+import kotlinx.datetime.TimeZone
+import kotlinx.datetime.toInstant
 import me.tatarka.inject.annotations.Assisted
 import me.tatarka.inject.annotations.Inject
 
@@ -59,6 +59,7 @@ class FeedPresenter(
   rssRepository: RssRepository,
   settingsRepository: SettingsRepository,
   private val observableActiveSource: ObservableActiveSource,
+  private val lastRefreshedAt: LastRefreshedAt,
   @Assisted feedId: String,
   @Assisted componentContext: ComponentContext,
   @Assisted private val dismiss: () -> Unit
@@ -72,6 +73,7 @@ class FeedPresenter(
         settingsRepository = settingsRepository,
         feedId = feedId,
         observableActiveSource = observableActiveSource,
+        lastRefreshedAt = lastRefreshedAt,
       )
     }
 
@@ -100,6 +102,7 @@ class FeedPresenter(
     private val settingsRepository: SettingsRepository,
     private val feedId: String,
     private val observableActiveSource: ObservableActiveSource,
+    private val lastRefreshedAt: LastRefreshedAt,
   ) : InstanceKeeper.Instance {
 
     private val coroutineScope = CoroutineScope(SupervisorJob() + dispatchersProvider.main)
@@ -131,18 +134,15 @@ class FeedPresenter(
 
     private fun onMarkPostsAsRead(feedId: String) {
       coroutineScope.launch {
-        val postsType = withContext(dispatchersProvider.io) { settingsRepository.postsType.first() }
-        val postsAfter =
-          when (postsType) {
-            PostsType.ALL,
-            PostsType.UNREAD -> Instant.DISTANT_PAST
-            PostsType.TODAY -> {
-              getTodayStartInstant()
-            }
-            PostsType.LAST_24_HOURS -> {
-              getLast24HourStart()
-            }
+        val (postsType, dateTime) =
+          withContext(dispatchersProvider.io) {
+            val postsType = settingsRepository.postsType.first()
+            val dateTime = lastRefreshedAt.dateTimeFlow.first()
+
+            Pair(postsType, dateTime)
           }
+        val postsAfter =
+          PostsFilterUtils.postsThresholdTime(postsType = postsType, dateTime = dateTime)
 
         rssRepository.markPostsInFeedAsRead(feedIds = listOf(feedId), postsAfter = postsAfter)
       }
@@ -166,21 +166,22 @@ class FeedPresenter(
 
     private fun init() {
       coroutineScope.launch {
-        val postsType = withContext(dispatchersProvider.io) { settingsRepository.postsType.first() }
-        val postsAfter =
-          when (postsType) {
-            PostsType.ALL,
-            PostsType.UNREAD -> Instant.DISTANT_PAST
-            PostsType.TODAY -> {
-              getTodayStartInstant()
-            }
-            PostsType.LAST_24_HOURS -> {
-              getLast24HourStart()
-            }
+        val (postsType, dateTime) =
+          withContext(dispatchersProvider.io) {
+            val postsType = settingsRepository.postsType.first()
+            val dateTime = lastRefreshedAt.dateTimeFlow.first()
+
+            Pair(postsType, dateTime)
           }
+        val postsAfter =
+          PostsFilterUtils.postsThresholdTime(postsType = postsType, dateTime = dateTime)
 
         rssRepository
-          .feed(feedId, postsAfter)
+          .feed(
+            feedId = feedId,
+            postsAfter = postsAfter,
+            lastSyncedAt = dateTime.toInstant(TimeZone.currentSystemDefault())
+          )
           .onEach { feed -> _state.update { it.copy(feed = feed) } }
           .catch {
             // no-op

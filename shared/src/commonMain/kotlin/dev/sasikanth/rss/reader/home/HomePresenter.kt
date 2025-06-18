@@ -17,10 +17,6 @@
 package dev.sasikanth.rss.reader.home
 
 import androidx.compose.material3.SheetValue
-import app.cash.paging.cachedIn
-import app.cash.paging.createPager
-import app.cash.paging.createPagingConfig
-import co.touchlab.crashkios.bugsnag.BugsnagKotlin
 import com.arkivanov.decompose.ComponentContext
 import com.arkivanov.decompose.childContext
 import com.arkivanov.essenty.backhandler.BackCallback
@@ -33,27 +29,30 @@ import dev.sasikanth.rss.reader.core.model.local.FeedGroup
 import dev.sasikanth.rss.reader.core.model.local.PostWithMetadata
 import dev.sasikanth.rss.reader.core.model.local.PostsType
 import dev.sasikanth.rss.reader.core.model.local.Source
+import dev.sasikanth.rss.reader.data.repository.HomeViewMode
 import dev.sasikanth.rss.reader.data.repository.MarkAsReadOn
 import dev.sasikanth.rss.reader.data.repository.ObservableActiveSource
 import dev.sasikanth.rss.reader.data.repository.RssRepository
 import dev.sasikanth.rss.reader.data.repository.SettingsRepository
+import dev.sasikanth.rss.reader.data.sync.SyncCoordinator
+import dev.sasikanth.rss.reader.data.time.LastRefreshedAt
 import dev.sasikanth.rss.reader.feeds.FeedsEvent
 import dev.sasikanth.rss.reader.feeds.FeedsPresenter
+import dev.sasikanth.rss.reader.posts.AllPostsPager
 import dev.sasikanth.rss.reader.util.DispatchersProvider
+import dev.sasikanth.rss.reader.utils.NTuple5
 import kotlin.time.Duration.Companion.hours
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.distinctUntilChangedBy
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.stateIn
@@ -61,7 +60,6 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.datetime.Clock
 import kotlinx.datetime.Instant
-import kotlinx.datetime.LocalDateTime
 import kotlinx.datetime.TimeZone
 import kotlinx.datetime.atStartOfDayIn
 import kotlinx.datetime.toInstant
@@ -70,7 +68,6 @@ import me.tatarka.inject.annotations.Assisted
 import me.tatarka.inject.annotations.Inject
 
 @Inject
-@OptIn(ExperimentalCoroutinesApi::class)
 class HomePresenter(
   dispatchersProvider: DispatchersProvider,
   feedsPresenterFactory:
@@ -83,7 +80,10 @@ class HomePresenter(
     ) -> FeedsPresenter,
   private val rssRepository: RssRepository,
   private val observableActiveSource: ObservableActiveSource,
+  private val lastRefreshedAt: LastRefreshedAt,
   private val settingsRepository: SettingsRepository,
+  private val allPostsPager: AllPostsPager,
+  private val syncCoordinator: SyncCoordinator,
   @Assisted componentContext: ComponentContext,
   @Assisted private val openSearch: () -> Unit,
   @Assisted private val openBookmarks: () -> Unit,
@@ -122,12 +122,16 @@ class HomePresenter(
         dispatchersProvider = dispatchersProvider,
         rssRepository = rssRepository,
         observableActiveSource = observableActiveSource,
+        lastRefreshedAt = lastRefreshedAt,
         settingsRepository = settingsRepository,
         feedsPresenter = feedsPresenter,
+        allPostsPager = allPostsPager,
+        syncCoordinator = syncCoordinator,
       )
     }
 
   internal val state = presenterInstance.state
+  internal val effects = presenterInstance.effects.asSharedFlow()
 
   init {
     lifecycle.doOnCreate {
@@ -135,10 +139,7 @@ class HomePresenter(
       backCallback.isEnabled = false
     }
 
-    lifecycle.doOnResume {
-      val currentDateTime = Clock.System.now().toLocalDateTime(TimeZone.currentSystemDefault())
-      dispatch(HomeEvent.UpdateCurrentDateTime(currentDateTime))
-    }
+    lifecycle.doOnResume { dispatch(HomeEvent.UpdateDate) }
   }
 
   fun dispatch(event: HomeEvent) {
@@ -161,8 +162,11 @@ class HomePresenter(
     dispatchersProvider: DispatchersProvider,
     private val rssRepository: RssRepository,
     private val observableActiveSource: ObservableActiveSource,
+    private val lastRefreshedAt: LastRefreshedAt,
     private val settingsRepository: SettingsRepository,
     private val feedsPresenter: FeedsPresenter,
+    private val allPostsPager: AllPostsPager,
+    private val syncCoordinator: SyncCoordinator,
   ) : InstanceKeeper.Instance {
 
     private val coroutineScope = CoroutineScope(SupervisorJob() + dispatchersProvider.main)
@@ -179,6 +183,8 @@ class HomePresenter(
         started = SharingStarted.WhileSubscribed(5000),
         initialValue = defaultState
       )
+
+    val effects = MutableSharedFlow<HomeEffect>()
 
     init {
       dispatch(HomeEvent.Init)
@@ -211,17 +217,34 @@ class HomePresenter(
         is HomeEvent.OnPostItemsScrolled -> onPostItemsScrolled(event.postIds)
         HomeEvent.MarkScrolledPostsAsRead -> markScrolledPostsAsRead()
         is HomeEvent.MarkFeaturedPostsAsRead -> markFeaturedPostAsRead(event.postId)
-        is HomeEvent.UpdateCurrentDateTime -> updateCurrentDateTime(event.dateTime)
+        is HomeEvent.ChangeHomeViewMode -> changeHomeViewMode(event.homeViewMode)
+        is HomeEvent.UpdateVisibleItemIndex -> updateVisibleItemIndex(event.index)
+        is HomeEvent.LoadNewArticlesClick -> loadNewArticles()
+        is HomeEvent.UpdateDate -> updateDate()
       }
     }
 
-    private fun updateCurrentDateTime(dateTime: LocalDateTime) {
-      coroutineScope.launch {
-        val currentDateTime = _state.value.currentDateTime
-        if (dateTime.date > currentDateTime.date) {
-          _state.update { it.copy(currentDateTime = dateTime) }
-        }
+    private fun updateDate() {
+      val currentDate = Clock.System.now().toLocalDateTime(TimeZone.currentSystemDefault())
+
+      if (_state.value.currentDateTime.date != currentDate.date) {
+        _state.update { it.copy(currentDateTime = currentDate) }
       }
+    }
+
+    private fun loadNewArticles() {
+      coroutineScope.launch {
+        _state.update { it.copy(unreadSinceLastSync = null) }
+        lastRefreshedAt.refresh()
+      }
+    }
+
+    private fun updateVisibleItemIndex(index: Int) {
+      coroutineScope.launch { effects.emit(HomeEffect.ScrollPostListTo(index)) }
+    }
+
+    private fun changeHomeViewMode(homeViewMode: HomeViewMode) {
+      coroutineScope.launch { settingsRepository.updateHomeViewMode(homeViewMode) }
     }
 
     private fun markFeaturedPostAsRead(postId: String) {
@@ -301,9 +324,8 @@ class HomePresenter(
       val activeSourceFlow = observableActiveSource.activeSource
       val postsTypeFlow = settingsRepository.postsType
 
-      _state
-        .distinctUntilChangedBy { it.currentDateTime }
-        .onEach { observePosts(activeSourceFlow, postsTypeFlow) }
+      syncCoordinator.syncState
+        .onEach { syncState -> _state.update { it.copy(syncState = syncState) } }
         .launchIn(coroutineScope)
 
       rssRepository
@@ -312,86 +334,49 @@ class HomePresenter(
         .onEach { hasFeeds -> _state.update { it.copy(hasFeeds = hasFeeds) } }
         .launchIn(coroutineScope)
 
-      combine(activeSourceFlow, postsTypeFlow) { activeSource, postsType ->
-          Pair(activeSource, postsType)
-        }
-        .flatMapLatest { (activeSource, postsType) ->
-          val postsAfter = postsThresholdTime(postsType)
-          val activeSourceIds = activeSourceIds(activeSource)
-
-          rssRepository.hasUnreadPostsInSource(
-            activeSourceIds = activeSourceIds,
-            postsAfter = postsAfter,
-          )
-        }
-        .onEach { hasUnreadPosts -> _state.update { it.copy(hasUnreadPosts = hasUnreadPosts) } }
+      allPostsPager.allPostsPagingData
+        .onEach { postsPagingData -> _state.update { it.copy(posts = postsPagingData) } }
         .launchIn(coroutineScope)
-    }
 
-    private fun observePosts(activeSourceFlow: Flow<Source?>, postsTypeFlow: Flow<PostsType>) {
-      combine(activeSourceFlow, postsTypeFlow) { activeSource, postsType ->
-          Pair(activeSource, postsType)
+      combine(
+          activeSourceFlow,
+          postsTypeFlow,
+          settingsRepository.homeViewMode,
+          allPostsPager.hasUnreadPosts,
+          allPostsPager.unreadSinceLastSync,
+        ) { activeSource, postsType, homeViewMode, hasUnreadPosts, unreadSinceLastSync ->
+          NTuple5(activeSource, postsType, homeViewMode, hasUnreadPosts, unreadSinceLastSync)
         }
         .distinctUntilChanged()
-        .onEach { (activeSource, postsType) ->
+        .onEach { (activeSource, postsType, homeViewMode, hasUnreadPosts, unreadSinceLastSync) ->
           _state.update {
             it.copy(
               activeSource = activeSource,
               postsType = postsType,
-              loadingState = HomeLoadingState.Loading,
+              homeViewMode = homeViewMode,
+              hasUnreadPosts = hasUnreadPosts,
+              unreadSinceLastSync = unreadSinceLastSync,
             )
           }
-        }
-        .onEach { (activeSource, postsType) ->
-          val unreadOnly = shouldGetUnreadPostsOnly(postsType)
-          val postsAfter = postsThresholdTime(postsType)
-          val activeSourceIds = activeSourceIds(activeSource)
-
-          val posts =
-            createPager(config = createPagingConfig(pageSize = 20, enablePlaceholders = true)) {
-                rssRepository.allPosts(
-                  activeSourceIds = activeSourceIds,
-                  unreadOnly = unreadOnly,
-                  after = postsAfter,
-                )
-              }
-              .flow
-              .cachedIn(coroutineScope)
-
-          _state.update { it.copy(posts = posts, loadingState = HomeLoadingState.Idle) }
         }
         .launchIn(coroutineScope)
     }
 
-    private fun postsThresholdTime(postsType: PostsType): Instant {
-      val currentDateTime = _state.value.currentDateTime
+    private fun postsThresholdTime(
+      postsType: PostsType,
+    ): Instant {
+      val dateTime = _state.value.currentDateTime
       return when (postsType) {
         PostsType.ALL,
         PostsType.UNREAD -> Instant.DISTANT_PAST
         PostsType.TODAY -> {
-          currentDateTime.date.atStartOfDayIn(TimeZone.currentSystemDefault())
+          dateTime.date.atStartOfDayIn(TimeZone.currentSystemDefault())
         }
         PostsType.LAST_24_HOURS -> {
-          currentDateTime.toInstant(TimeZone.currentSystemDefault()).minus(24.hours)
+          dateTime.toInstant(TimeZone.currentSystemDefault()).minus(24.hours)
         }
       }
     }
-
-    private fun shouldGetUnreadPostsOnly(postsType: PostsType): Boolean? {
-      return when (postsType) {
-        PostsType.UNREAD -> true
-        PostsType.ALL,
-        PostsType.TODAY,
-        PostsType.LAST_24_HOURS -> null
-      }
-    }
-
-    private fun activeSourceIds(activeSource: Source?) =
-      when (activeSource) {
-        is Feed -> listOf(activeSource.id)
-        is FeedGroup -> activeSource.feedIds
-        else -> emptyList()
-      }
 
     private fun feedsSheetStateChanged(feedsSheetState: SheetValue) {
       _state.update {
@@ -410,18 +395,10 @@ class HomePresenter(
 
     private fun refreshContent() {
       coroutineScope.launch {
-        _state.update { it.copy(loadingState = HomeLoadingState.Loading) }
-        try {
-          when (val selectedSource = _state.value.activeSource) {
-            is FeedGroup -> rssRepository.updateGroup(selectedSource.feedIds)
-            is Feed -> rssRepository.updateFeed(selectedSource.id)
-            else -> rssRepository.updateFeeds()
-          }
-        } catch (e: Exception) {
-          BugsnagKotlin.logMessage("RefreshContent")
-          BugsnagKotlin.sendHandledException(e)
-        } finally {
-          _state.update { it.copy(loadingState = HomeLoadingState.Idle) }
+        when (val selectedSource = _state.value.activeSource) {
+          is FeedGroup -> syncCoordinator.refreshFeeds(selectedSource.feedIds)
+          is Feed -> syncCoordinator.refreshFeed(selectedSource.id)
+          else -> syncCoordinator.refreshFeeds()
         }
       }
     }

@@ -20,12 +20,14 @@ import app.cash.sqldelight.coroutines.asFlow
 import app.cash.sqldelight.coroutines.mapToList
 import app.cash.sqldelight.coroutines.mapToOne
 import app.cash.sqldelight.paging3.QueryPagingSource
+import co.touchlab.kermit.Logger
 import dev.sasikanth.rss.reader.core.model.local.Feed
 import dev.sasikanth.rss.reader.core.model.local.FeedGroup
 import dev.sasikanth.rss.reader.core.model.local.Post
 import dev.sasikanth.rss.reader.core.model.local.PostWithMetadata
 import dev.sasikanth.rss.reader.core.model.local.SearchSortOrder
 import dev.sasikanth.rss.reader.core.model.local.Source
+import dev.sasikanth.rss.reader.core.model.local.UnreadSinceLastSync
 import dev.sasikanth.rss.reader.core.network.fetcher.FeedFetchResult
 import dev.sasikanth.rss.reader.core.network.fetcher.FeedFetcher
 import dev.sasikanth.rss.reader.data.database.BookmarkQueries
@@ -41,12 +43,8 @@ import dev.sasikanth.rss.reader.data.utils.Constants
 import dev.sasikanth.rss.reader.di.scopes.AppScope
 import dev.sasikanth.rss.reader.util.DispatchersProvider
 import dev.sasikanth.rss.reader.util.nameBasedUuidOf
-import kotlin.time.Duration.Companion.seconds
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
-import kotlinx.coroutines.joinAll
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.datetime.Clock
 import kotlinx.datetime.Instant
@@ -67,10 +65,6 @@ class RssRepository(
   private val sourceQueries: SourceQueries,
   private val dispatchersProvider: DispatchersProvider
 ) {
-
-  companion object {
-    private const val UPDATE_CHUNKS = 6
-  }
 
   suspend fun fetchAndAddFeed(
     feedLink: String,
@@ -129,6 +123,7 @@ class RssRepository(
         FeedAddResult.HttpStatusError(feedFetchResult.statusCode)
       }
       is FeedFetchResult.Error -> {
+        Logger.e("FeedFetchException", feedFetchResult.exception)
         FeedAddResult.NetworkError(feedFetchResult.exception)
       }
       FeedFetchResult.TooManyRedirects -> {
@@ -137,44 +132,40 @@ class RssRepository(
     }
   }
 
-  suspend fun updateFeeds() {
-    withContext(dispatchersProvider.io) {
-      val feedsChunks = allFeedsBlocking().chunked(UPDATE_CHUNKS)
-
-      feedsChunks.forEach { feeds ->
-        val jobs =
-          feeds.map { feed ->
-            launch { fetchAndAddFeed(feedLink = feed.link, feedLastCleanUpAt = feed.lastCleanUpAt) }
-          }
-        jobs.joinAll()
-
-        delay(1.seconds)
-      }
-    }
-  }
-
-  suspend fun updateFeed(selectedFeedId: String) {
-    val feed =
-      withContext(dispatchersProvider.databaseRead) {
-        feedQueries.feed(selectedFeedId).executeAsOneOrNull()
-      }
-
-    if (feed != null) {
-      fetchAndAddFeed(feedLink = feed.link, feedLastCleanUpAt = feed.lastCleanUpAt)
-    }
-  }
-
-  suspend fun updateGroup(feedIds: List<String>) {
-    feedIds.forEach { feedId ->
-      val feed =
-        withContext(dispatchersProvider.databaseRead) {
-          feedQueries.feed(feedId).executeAsOneOrNull()
+  fun feed(feedId: String): Feed? {
+    return feedQueries
+      .feed(
+        feedId,
+        mapper = {
+          id: String,
+          name: String,
+          icon: String,
+          description: String,
+          link: String,
+          homepageLink: String,
+          createdAt: Instant,
+          pinnedAt: Instant?,
+          lastCleanUpAt: Instant?,
+          alwaysFetchSourceArticle: Boolean,
+          pinnedPosition: Double,
+          showFeedFavIcon: Boolean ->
+          Feed(
+            id = id,
+            name = name,
+            icon = icon,
+            description = description,
+            homepageLink = homepageLink,
+            createdAt = createdAt,
+            link = link,
+            pinnedAt = pinnedAt,
+            lastCleanUpAt = lastCleanUpAt,
+            alwaysFetchSourceArticle = alwaysFetchSourceArticle,
+            pinnedPosition = pinnedPosition,
+            showFeedFavIcon = showFeedFavIcon,
+          )
         }
-
-      if (feed != null) {
-        fetchAndAddFeed(feedLink = feed.link, feedLastCleanUpAt = feed.lastCleanUpAt)
-      }
-    }
+      )
+      .executeAsOneOrNull()
   }
 
   fun allPosts(
@@ -353,11 +344,16 @@ class RssRepository(
     )
   }
 
-  fun feed(feedId: String, postsAfter: Instant = Instant.DISTANT_PAST): Flow<Feed> {
+  fun feed(
+    feedId: String,
+    postsAfter: Instant = Instant.DISTANT_PAST,
+    lastSyncedAt: Instant = Instant.DISTANT_FUTURE,
+  ): Flow<Feed> {
     return feedQueries
       .feedWithUnreadPostsCount(
         id = feedId,
         postsAfter = postsAfter,
+        lastSyncedAt = lastSyncedAt,
         mapper = {
           id: String,
           name: String,
@@ -391,12 +387,17 @@ class RssRepository(
       .mapToOne(dispatchersProvider.databaseRead)
   }
 
-  suspend fun feedBlocking(feedId: String, postsAfter: Instant = Instant.DISTANT_PAST): Feed {
+  suspend fun feedBlocking(
+    feedId: String,
+    postsAfter: Instant = Instant.DISTANT_PAST,
+    lastSyncedAt: Instant = Instant.DISTANT_FUTURE,
+  ): Feed {
     return withContext(dispatchersProvider.databaseRead) {
       feedQueries
         .feedWithUnreadPostsCount(
           id = feedId,
           postsAfter = postsAfter,
+          lastSyncedAt = lastSyncedAt,
           mapper = {
             id: String,
             name: String,
@@ -664,10 +665,14 @@ class RssRepository(
     }
   }
 
-  fun pinnedSources(postsAfter: Instant = Instant.DISTANT_PAST): Flow<List<Source>> {
+  fun pinnedSources(
+    postsAfter: Instant = Instant.DISTANT_PAST,
+    lastSyncedAt: Instant = Instant.DISTANT_FUTURE,
+  ): Flow<List<Source>> {
     return sourceQueries
       .pinnedSources(
         postsAfter = postsAfter,
+        lastSyncedAt = lastSyncedAt,
         mapper = {
           type: String,
           id: String,
@@ -722,6 +727,7 @@ class RssRepository(
 
   fun sources(
     postsAfter: Instant = Instant.DISTANT_PAST,
+    lastSyncedAt: Instant = Instant.DISTANT_FUTURE,
     orderBy: FeedsOrderBy = FeedsOrderBy.Latest,
   ): PagingSource<Int, Source> {
     return QueryPagingSource(
@@ -731,6 +737,7 @@ class RssRepository(
       queryProvider = { limit, offset ->
         sourceQueries.sources(
           postsAfter = postsAfter,
+          lastSyncedAt = lastSyncedAt,
           orderBy = orderBy.value,
           limit = limit,
           offset = offset,
@@ -951,6 +958,29 @@ class RssRepository(
       .asFlow()
       .mapToOne(dispatchersProvider.databaseRead)
       .map { it > 0 }
+  }
+
+  fun unreadSinceLastSync(
+    sources: List<String>,
+    postsAfter: Instant,
+    lastSyncedAt: Instant
+  ): Flow<UnreadSinceLastSync> {
+    return postQueries
+      .unreadSinceLastSync(
+        isSourceIdsEmpty = sources.isEmpty(),
+        sourceIds = sources,
+        postsAfter = postsAfter,
+        lastSyncedAt = lastSyncedAt,
+        mapper = { count, feedHomepageLinks, feedIcons ->
+          UnreadSinceLastSync(
+            hasNewArticles = count > 0,
+            feedHomepageLinks = feedHomepageLinks.orEmpty().split(",").filterNot { it.isBlank() },
+            feedIcons = feedIcons.orEmpty().split(",").filterNot { it.isBlank() }
+          )
+        }
+      )
+      .asFlow()
+      .mapToOne(dispatchersProvider.databaseRead)
   }
 
   private fun sanitizeSearchQuery(searchQuery: String): String {

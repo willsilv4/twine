@@ -36,15 +36,15 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.Text
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.KeyboardArrowUp
-import androidx.compose.material.pullrefresh.PullRefreshIndicator
-import androidx.compose.material.pullrefresh.pullRefresh
-import androidx.compose.material.pullrefresh.rememberPullRefreshState
 import androidx.compose.material3.BottomSheetScaffold
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SheetState
 import androidx.compose.material3.SheetValue
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
+import androidx.compose.material3.pulltorefresh.PullToRefreshDefaults.Indicator
+import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.material3.rememberBottomSheetScaffoldState
 import androidx.compose.material3.rememberStandardBottomSheetState
 import androidx.compose.runtime.Composable
@@ -70,17 +70,19 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.coerceAtLeast
 import androidx.compose.ui.unit.dp
+import androidx.paging.LoadState
 import app.cash.paging.compose.LazyPagingItems
 import app.cash.paging.compose.collectAsLazyPagingItems
-import dev.sasikanth.rss.reader.components.CompactFloatingActionButton
+import dev.sasikanth.rss.reader.components.NewArticlesScrollToTopButton
 import dev.sasikanth.rss.reader.core.model.local.PostWithMetadata
+import dev.sasikanth.rss.reader.data.repository.HomeViewMode
 import dev.sasikanth.rss.reader.feeds.ui.FeedsBottomSheet
+import dev.sasikanth.rss.reader.home.HomeEffect
 import dev.sasikanth.rss.reader.home.HomeEvent
 import dev.sasikanth.rss.reader.home.HomePresenter
 import dev.sasikanth.rss.reader.platform.LocalLinkHandler
 import dev.sasikanth.rss.reader.resources.icons.Feed
 import dev.sasikanth.rss.reader.resources.icons.TwineIcons
-import dev.sasikanth.rss.reader.resources.strings.LocalStrings
 import dev.sasikanth.rss.reader.ui.AppTheme
 import dev.sasikanth.rss.reader.ui.LocalSeedColorExtractor
 import dev.sasikanth.rss.reader.utils.Constants
@@ -89,8 +91,15 @@ import kotlinx.collections.immutable.ImmutableList
 import kotlinx.collections.immutable.persistentListOf
 import kotlinx.collections.immutable.toImmutableList
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.launch
+import org.jetbrains.compose.resources.stringResource
+import twine.shared.generated.resources.Res
+import twine.shared.generated.resources.noFeeds
+import twine.shared.generated.resources.noNewPosts
+import twine.shared.generated.resources.noNewPostsSubtitle
+import twine.shared.generated.resources.swipeUpGetStarted
 
 internal val BOTTOM_SHEET_PEEK_HEIGHT = 96.dp
 private val BOTTOM_SHEET_CORNER_SIZE = 32.dp
@@ -109,9 +118,10 @@ internal fun HomeScreen(
   val linkHandler = LocalLinkHandler.current
 
   val posts = state.posts?.collectAsLazyPagingItems()
-  val featuredPosts by featuredPosts(posts).collectAsState(initial = persistentListOf())
+  val featuredPosts by
+    featuredPosts(posts, state.homeViewMode).collectAsState(initial = persistentListOf())
 
-  val listState = rememberLazyListState()
+  val postsListState = rememberLazyListState()
   val featuredPostsPagerState = rememberPagerState(pageCount = { featuredPosts.size })
   val bottomSheetState =
     rememberStandardBottomSheetState(
@@ -132,7 +142,24 @@ internal fun HomeScreen(
     rememberBottomSheetScaffoldState(bottomSheetState = bottomSheetState)
 
   val bottomSheetProgress by bottomSheetState.progressAsState()
-  val showScrollToTop by remember { derivedStateOf { listState.firstVisibleItemIndex > 0 } }
+  val showScrollToTop by remember { derivedStateOf { postsListState.firstVisibleItemIndex > 0 } }
+  val unreadSinceLastSync = state.unreadSinceLastSync
+
+  LaunchedEffect(Unit) {
+    homePresenter.effects.collectLatest { effect ->
+      when (effect) {
+        is HomeEffect.ScrollPostListTo -> {
+          if (effect.index < Constants.NUMBER_OF_FEATURED_POSTS) {
+            featuredPostsPagerState.scrollToPage(effect.index)
+          } else {
+            // Since indexes start from 0, we are increasing the featured posts size by one
+            val adjustedIndex = (effect.index - featuredPosts.size + 1).coerceAtLeast(0)
+            postsListState.scrollToItem(adjustedIndex)
+          }
+        }
+      }
+    }
+  }
 
   AppTheme(useDarkTheme = true) {
     Scaffold(modifier) { scaffoldPadding ->
@@ -187,31 +214,27 @@ internal fun HomeScreen(
           AppTheme(useDarkTheme = useDarkTheme) {
             Box(modifier = Modifier.fillMaxSize().background(AppTheme.colorScheme.backdrop)) {
               val hasFeeds = state.hasFeeds
-              val swipeRefreshState =
-                rememberPullRefreshState(
-                  refreshing = state.isRefreshing,
-                  onRefresh = { homePresenter.dispatch(HomeEvent.OnSwipeToRefresh) }
-                )
-              val canSwipeToRefresh = hasFeeds == true
 
               HomeScreenContentScaffold(
-                modifier =
-                  Modifier.pullRefresh(state = swipeRefreshState, enabled = canSwipeToRefresh),
                 homeTopAppBar = {
                   HomeTopAppBar(
                     source = state.activeSource,
                     currentDateTime = state.currentDateTime,
                     postsType = state.postsType,
-                    listState = listState,
+                    listState = postsListState,
                     hasFeeds = hasFeeds,
                     hasUnreadPosts = state.hasUnreadPosts,
+                    homeViewMode = state.homeViewMode,
                     onSearchClicked = { homePresenter.dispatch(HomeEvent.SearchClicked) },
                     onBookmarksClicked = { homePresenter.dispatch(HomeEvent.BookmarksClicked) },
                     onSettingsClicked = { homePresenter.dispatch(HomeEvent.SettingsClicked) },
                     onPostTypeChanged = {
                       homePresenter.dispatch(HomeEvent.OnPostsTypeChanged(it))
                     },
-                    onMarkPostsAsRead = { homePresenter.dispatch(HomeEvent.MarkPostsAsRead(it)) }
+                    onMarkPostsAsRead = { homePresenter.dispatch(HomeEvent.MarkPostsAsRead(it)) },
+                    onChangeHomeViewMode = {
+                      homePresenter.dispatch(HomeEvent.ChangeHomeViewMode(it))
+                    }
                   )
                 },
                 body = { paddingValues ->
@@ -220,54 +243,72 @@ internal fun HomeScreen(
                       hasFeeds == null || posts == null -> {
                         // no-op
                       }
-                      posts.itemCount > 0 -> {
-                        PostsList(
-                          modifier = Modifier.nestedScroll(nestedScrollConnection),
-                          paddingValues = paddingValues,
-                          featuredPosts = featuredPosts,
-                          posts = posts,
-                          useDarkTheme = useDarkTheme,
-                          listState = listState,
-                          featuredPostsPagerState = featuredPostsPagerState,
-                          markPostAsRead = {
-                            homePresenter.dispatch(HomeEvent.MarkFeaturedPostsAsRead(it))
-                          },
-                          postsScrolled = {
-                            homePresenter.dispatch(HomeEvent.OnPostItemsScrolled(it))
-                          },
-                          markScrolledPostsAsRead = {
-                            homePresenter.dispatch(HomeEvent.MarkScrolledPostsAsRead)
-                          },
-                          onPostClicked = { post, postIndex ->
-                            homePresenter.dispatch(HomeEvent.OnPostClicked(post, postIndex))
-                          },
-                          onPostBookmarkClick = {
-                            homePresenter.dispatch(HomeEvent.OnPostBookmarkClick(it))
-                          },
-                          onPostCommentsClick = { commentsLink ->
-                            coroutineScope.launch { linkHandler.openLink(commentsLink) }
-                          },
-                          onPostSourceClick = { feedId ->
-                            homePresenter.dispatch(HomeEvent.OnPostSourceClicked(feedId))
-                          },
-                          onTogglePostReadClick = { postId, postRead ->
-                            homePresenter.dispatch(HomeEvent.TogglePostReadStatus(postId, postRead))
-                          }
-                        )
-                      }
-                      !hasFeeds -> {
+                      !hasFeeds && posts.loadState.refresh is LoadState.NotLoading -> {
                         NoFeeds { coroutineScope.launch { bottomSheetState.expand() } }
                       }
-                      featuredPosts.isEmpty() && posts.itemCount == 0 -> {
+                      featuredPosts.isEmpty() &&
+                        posts.itemCount == 0 &&
+                        posts.loadState.refresh is LoadState.NotLoading -> {
                         NoNewPosts()
                       }
-                    }
+                      else -> {
+                        val pullToRefreshState = rememberPullToRefreshState()
 
-                    PullRefreshIndicator(
-                      refreshing = state.isRefreshing,
-                      state = swipeRefreshState,
-                      modifier = Modifier.padding(paddingValues).align(Alignment.TopCenter)
-                    )
+                        PullToRefreshBox(
+                          state = pullToRefreshState,
+                          isRefreshing = state.isSyncing,
+                          onRefresh = { homePresenter.dispatch(HomeEvent.OnSwipeToRefresh) },
+                          indicator = {
+                            Indicator(
+                              modifier =
+                                Modifier.align(Alignment.TopCenter)
+                                  .padding(top = paddingValues.calculateTopPadding()),
+                              isRefreshing = state.isSyncing,
+                              containerColor = AppTheme.colorScheme.primaryContainer,
+                              color = AppTheme.colorScheme.primary,
+                              state = pullToRefreshState
+                            )
+                          }
+                        ) {
+                          PostsList(
+                            modifier = Modifier.fillMaxSize().nestedScroll(nestedScrollConnection),
+                            paddingValues = paddingValues,
+                            featuredPosts = featuredPosts,
+                            posts = posts,
+                            useDarkTheme = useDarkTheme,
+                            listState = postsListState,
+                            featuredPostsPagerState = featuredPostsPagerState,
+                            homeViewMode = state.homeViewMode,
+                            markPostAsRead = {
+                              homePresenter.dispatch(HomeEvent.MarkFeaturedPostsAsRead(it))
+                            },
+                            postsScrolled = {
+                              homePresenter.dispatch(HomeEvent.OnPostItemsScrolled(it))
+                            },
+                            markScrolledPostsAsRead = {
+                              homePresenter.dispatch(HomeEvent.MarkScrolledPostsAsRead)
+                            },
+                            onPostClicked = { post, postIndex ->
+                              homePresenter.dispatch(HomeEvent.OnPostClicked(post, postIndex))
+                            },
+                            onPostBookmarkClick = {
+                              homePresenter.dispatch(HomeEvent.OnPostBookmarkClick(it))
+                            },
+                            onPostCommentsClick = { commentsLink ->
+                              coroutineScope.launch { linkHandler.openLink(commentsLink) }
+                            },
+                            onPostSourceClick = { feedId ->
+                              homePresenter.dispatch(HomeEvent.OnPostSourceClicked(feedId))
+                            },
+                            onTogglePostReadClick = { postId, postRead ->
+                              homePresenter.dispatch(
+                                HomeEvent.TogglePostReadStatus(postId, postRead)
+                              )
+                            }
+                          )
+                        }
+                      }
+                    }
                   }
                 },
               )
@@ -282,9 +323,9 @@ internal fun HomeScreen(
                     .align(Alignment.BottomCenter)
               )
 
-              CompactFloatingActionButton(
-                label = LocalStrings.current.scrollToTop,
-                visible = showScrollToTop,
+              NewArticlesScrollToTopButton(
+                unreadSinceLastSync = unreadSinceLastSync,
+                canShowScrollToTop = showScrollToTop,
                 modifier =
                   Modifier.padding(
                     end = 16.dp,
@@ -293,9 +334,10 @@ internal fun HomeScreen(
                         .calculateBottomPadding()
                         .coerceAtLeast(scaffoldPadding.calculateBottomPadding()) + 16.dp
                   ),
+                onLoadNewArticlesClick = { homePresenter.dispatch(HomeEvent.LoadNewArticlesClick) },
               ) {
                 scrollToTopClicked = true
-                listState.animateScrollToItem(0)
+                postsListState.animateScrollToItem(0)
               }
             }
           }
@@ -307,7 +349,7 @@ internal fun HomeScreen(
             closeSheet = { coroutineScope.launch { bottomSheetState.partialExpand() } },
             selectedFeedChanged = {
               coroutineScope.launch {
-                listState.scrollToItem(0)
+                postsListState.scrollToItem(0)
                 featuredPostsPagerState.scrollToPage(0)
               }
             }
@@ -347,7 +389,7 @@ private fun NoFeeds(onNoFeedsSwipeUp: () -> Unit) {
     verticalArrangement = Arrangement.Center
   ) {
     Text(
-      text = LocalStrings.current.noFeeds,
+      text = stringResource(Res.string.noFeeds),
       style = MaterialTheme.typography.headlineMedium,
       color = AppTheme.colorScheme.textEmphasisHigh,
       textAlign = TextAlign.Center
@@ -356,7 +398,7 @@ private fun NoFeeds(onNoFeedsSwipeUp: () -> Unit) {
     Spacer(Modifier.requiredHeight(8.dp))
 
     Text(
-      text = LocalStrings.current.swipeUpGetStarted,
+      text = stringResource(Res.string.swipeUpGetStarted),
       style = MaterialTheme.typography.labelLarge,
       color = AppTheme.colorScheme.textEmphasisMed,
       textAlign = TextAlign.Center
@@ -390,7 +432,7 @@ private fun NoNewPosts() {
     Spacer(Modifier.requiredHeight(12.dp))
 
     Text(
-      text = LocalStrings.current.noNewPosts,
+      text = stringResource(Res.string.noNewPosts),
       style = MaterialTheme.typography.headlineMedium,
       color = AppTheme.colorScheme.textEmphasisHigh,
       textAlign = TextAlign.Center
@@ -399,7 +441,7 @@ private fun NoNewPosts() {
     Spacer(Modifier.requiredHeight(8.dp))
 
     Text(
-      text = LocalStrings.current.noNewPostsSubtitle,
+      text = stringResource(Res.string.noNewPostsSubtitle),
       style = MaterialTheme.typography.labelLarge,
       color = AppTheme.colorScheme.textEmphasisMed,
       textAlign = TextAlign.Center
@@ -425,12 +467,13 @@ private fun SheetState.progressAsState(): State<Float> {
 
 @Composable
 fun featuredPosts(
-  posts: LazyPagingItems<PostWithMetadata>?
+  posts: LazyPagingItems<PostWithMetadata>?,
+  homeViewMode: HomeViewMode
 ): Flow<ImmutableList<FeaturedPostItem>> {
   val seedColorExtractor = LocalSeedColorExtractor.current
-  return remember(posts?.loadState) {
+  return remember(posts?.itemSnapshotList?.items, homeViewMode) {
     flow {
-      if (posts == null || posts.itemCount == 0) {
+      if (homeViewMode != HomeViewMode.Default || posts == null || posts.itemCount == 0) {
         emit(persistentListOf())
         return@flow
       }

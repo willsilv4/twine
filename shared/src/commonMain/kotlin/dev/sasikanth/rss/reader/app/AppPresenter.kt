@@ -42,17 +42,20 @@ import dev.sasikanth.rss.reader.bookmarks.BookmarksPresenterFactory
 import dev.sasikanth.rss.reader.core.model.local.PostWithMetadata
 import dev.sasikanth.rss.reader.data.repository.RssRepository
 import dev.sasikanth.rss.reader.data.repository.SettingsRepository
+import dev.sasikanth.rss.reader.data.sync.SyncCoordinator
+import dev.sasikanth.rss.reader.data.time.LastRefreshedAt
 import dev.sasikanth.rss.reader.di.scopes.ActivityScope
 import dev.sasikanth.rss.reader.feed.FeedPresenterFactory
 import dev.sasikanth.rss.reader.feeds.FeedsEvent
 import dev.sasikanth.rss.reader.group.GroupEvent
 import dev.sasikanth.rss.reader.group.GroupPresenterFactory
 import dev.sasikanth.rss.reader.groupselection.GroupSelectionPresenterFactory
+import dev.sasikanth.rss.reader.home.HomeEvent
 import dev.sasikanth.rss.reader.home.HomePresenterFactory
 import dev.sasikanth.rss.reader.platform.LinkHandler
+import dev.sasikanth.rss.reader.reader.ReaderEvent
 import dev.sasikanth.rss.reader.reader.ReaderPresenterFactory
 import dev.sasikanth.rss.reader.reader.ReaderScreenArgs
-import dev.sasikanth.rss.reader.refresh.LastUpdatedAt
 import dev.sasikanth.rss.reader.search.SearchPresentFactory
 import dev.sasikanth.rss.reader.settings.SettingsPresenterFactory
 import dev.sasikanth.rss.reader.util.DispatchersProvider
@@ -90,19 +93,20 @@ class AppPresenter(
   private val addFeedPresenter: AddFeedPresenterFactory,
   private val groupPresenter: GroupPresenterFactory,
   private val blockedWordsPresenter: BlockedWordsPresenterFactory,
-  private val lastUpdatedAt: LastUpdatedAt,
+  private val lastRefreshedAt: LastRefreshedAt,
   private val rssRepository: RssRepository,
   private val settingsRepository: SettingsRepository,
   private val linkHandler: LinkHandler,
+  private val syncCoordinator: SyncCoordinator,
 ) : ComponentContext by componentContext {
 
   private val presenterInstance =
     instanceKeeper.getOrCreate {
       PresenterInstance(
         dispatchersProvider = dispatchersProvider,
-        lastUpdatedAt = lastUpdatedAt,
-        rssRepository = rssRepository,
         settingsRepository = settingsRepository,
+        lastRefreshedAt = lastRefreshedAt,
+        syncCoordinator = syncCoordinator,
       )
     }
 
@@ -144,7 +148,12 @@ class AppPresenter(
   }
 
   fun onBackClicked() {
-    navigation.pop()
+    val isReaderScreen = screenStack.active.instance is Screen.Reader
+    if (isReaderScreen) {
+      (screenStack.active.instance as? Screen.Reader)?.presenter?.dispatch(ReaderEvent.BackClicked)
+    } else {
+      navigation.pop()
+    }
   }
 
   private fun createModal(modalConfig: ModalConfig, componentContext: ComponentContext): Modals =
@@ -222,12 +231,17 @@ class AppPresenter(
           presenter =
             readerPresenter(
               ReaderScreenArgs(
+                postId = config.post.id,
                 postIndex = config.postIndex,
                 fromScreen = config.fromScreen,
               ),
               componentContext
-            ) {
-              navigation.pop()
+            ) { activePostIndex ->
+              navigation.pop {
+                (screenStack.active.instance as? Screen.Home)
+                  ?.presenter
+                  ?.dispatch(HomeEvent.UpdateVisibleItemIndex(activePostIndex))
+              }
             }
         )
       }
@@ -326,8 +340,8 @@ class AppPresenter(
   private class PresenterInstance(
     dispatchersProvider: DispatchersProvider,
     settingsRepository: SettingsRepository,
-    private val lastUpdatedAt: LastUpdatedAt,
-    private val rssRepository: RssRepository,
+    private val lastRefreshedAt: LastRefreshedAt,
+    private val syncCoordinator: SyncCoordinator,
   ) : InstanceKeeper.Instance {
 
     private val coroutineScope = CoroutineScope(SupervisorJob() + dispatchersProvider.main)
@@ -343,20 +357,26 @@ class AppPresenter(
       combine(
           settingsRepository.appThemeMode,
           settingsRepository.showFeedFavIcon,
-        ) { appThemeMode, showFeedFavIcon ->
-          Pair(appThemeMode, showFeedFavIcon)
+          settingsRepository.homeViewMode,
+        ) { appThemeMode, showFeedFavIcon, homeViewMode ->
+          Triple(appThemeMode, showFeedFavIcon, homeViewMode)
         }
-        .onEach { (appThemeMode, showFeedFavIcon) ->
-          _state.update { it.copy(appThemeMode = appThemeMode, showFeedFavIcon = showFeedFavIcon) }
+        .onEach { (appThemeMode, showFeedFavIcon, homeViewMode) ->
+          _state.update {
+            it.copy(
+              appThemeMode = appThemeMode,
+              showFeedFavIcon = showFeedFavIcon,
+              homeViewMode = homeViewMode
+            )
+          }
         }
         .launchIn(coroutineScope)
     }
 
     fun refreshFeedsIfExpired() {
       coroutineScope.launch {
-        if (lastUpdatedAt.hasExpired()) {
-          rssRepository.updateFeeds()
-          lastUpdatedAt.refresh()
+        if (lastRefreshedAt.hasExpired()) {
+          syncCoordinator.refreshFeeds()
         }
       }
     }

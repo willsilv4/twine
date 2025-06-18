@@ -1,8 +1,3 @@
-@file:Suppress(
-  "CANNOT_OVERRIDE_INVISIBLE_MEMBER",
-  "INVISIBLE_MEMBER",
-  "INVISIBLE_REFERENCE",
-)
 /*
  * Copyright 2024 Sasikanth Miriyampalli
  *
@@ -55,6 +50,8 @@ import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.PagerState
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.DisableSelection
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material3.CenterAlignedTopAppBar
@@ -102,7 +99,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import app.cash.paging.compose.collectAsLazyPagingItems
-import app.cash.paging.compose.itemKey
 import com.adamglin.composeshadow.dropShadow
 import com.mikepenz.markdown.compose.LocalImageTransformer
 import com.mikepenz.markdown.compose.LocalMarkdownAnimations
@@ -119,7 +115,6 @@ import com.mikepenz.markdown.compose.elements.MarkdownHighlightedCodeFence
 import com.mikepenz.markdown.m3.markdownColor
 import com.mikepenz.markdown.m3.markdownTypography
 import com.mikepenz.markdown.model.Input
-import com.mikepenz.markdown.model.MarkdownState
 import com.mikepenz.markdown.model.ReferenceLinkHandlerImpl
 import com.mikepenz.markdown.model.State
 import com.mikepenz.markdown.model.markdownAnimations
@@ -134,6 +129,7 @@ import dev.sasikanth.rss.reader.core.model.local.PostWithMetadata
 import dev.sasikanth.rss.reader.home.ui.FeaturedImage
 import dev.sasikanth.rss.reader.home.ui.PostMetadataConfig
 import dev.sasikanth.rss.reader.markdown.CoilMarkdownTransformer
+import dev.sasikanth.rss.reader.markdown.MarkdownStateImpl
 import dev.sasikanth.rss.reader.markdown.handleElement
 import dev.sasikanth.rss.reader.platform.LocalLinkHandler
 import dev.sasikanth.rss.reader.reader.ReaderEvent
@@ -146,7 +142,6 @@ import dev.sasikanth.rss.reader.resources.icons.OpenBrowser
 import dev.sasikanth.rss.reader.resources.icons.Settings
 import dev.sasikanth.rss.reader.resources.icons.Share
 import dev.sasikanth.rss.reader.resources.icons.TwineIcons
-import dev.sasikanth.rss.reader.resources.strings.LocalStrings
 import dev.sasikanth.rss.reader.share.LocalShareHandler
 import dev.sasikanth.rss.reader.ui.AppTheme
 import dev.sasikanth.rss.reader.ui.LocalAppColorScheme
@@ -166,6 +161,16 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import org.intellij.markdown.flavours.gfm.GFMFlavourDescriptor
 import org.intellij.markdown.parser.MarkdownParser
+import org.jetbrains.compose.resources.stringResource
+import twine.shared.generated.resources.Res
+import twine.shared.generated.resources.bookmark
+import twine.shared.generated.resources.cdLoadFullArticle
+import twine.shared.generated.resources.comingSoon
+import twine.shared.generated.resources.comments
+import twine.shared.generated.resources.openWebsite
+import twine.shared.generated.resources.readerSettings
+import twine.shared.generated.resources.share
+import twine.shared.generated.resources.unBookmark
 
 private val json = Json {
   ignoreUnknownKeys = true
@@ -179,12 +184,10 @@ internal fun ReaderScreen(
   presenter: ReaderPresenter,
   modifier: Modifier = Modifier
 ) {
+  val coroutineScope = rememberCoroutineScope()
   val state by presenter.state.collectAsState()
   val posts = state.posts.collectAsLazyPagingItems()
-  val pagerState = rememberPagerState { posts.itemCount }
-  val coroutineScope = rememberCoroutineScope()
   val linkHandler = LocalLinkHandler.current
-  val scrollBehaviour = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
   val seedColorExtractor = LocalSeedColorExtractor.current
   // Using theme colors as default from the home screen
   // before we create dynamic content theme
@@ -202,23 +205,9 @@ internal fun ReaderScreen(
       }
     }
   }
+  val pagerState = rememberPagerState(initialPage = state.activePostIndex) { posts.itemCount }
 
-  LaunchedEffect(pagerState, posts.loadState) {
-    snapshotFlow { pagerState.settledPage }
-      .distinctUntilChanged()
-      .collectLatest { page ->
-        val readerPost =
-          try {
-            posts[page]
-          } catch (e: IndexOutOfBoundsException) {
-            null
-          }
-        if (readerPost != null) {
-          presenter.dispatch(ReaderEvent.PostPageChanged(readerPost))
-        }
-      }
-  }
-
+  // Dynamic theme animator
   LaunchedEffect(pagerState, posts.loadState) {
     snapshotFlow {
         val settledPage = pagerState.settledPage
@@ -229,14 +218,10 @@ internal fun ReaderScreen(
         }
       }
       .collect { offset ->
-        val readerPost =
-          try {
-            posts[pagerState.settledPage]
-          } catch (e: IndexOutOfBoundsException) {
-            null
-          }
+        val settledPage = pagerState.settledPage
+        val activePost = runCatching { posts.peek(settledPage) }.getOrNull()
 
-        if (readerPost != null) {
+        if (activePost != null) {
           // The default snap position of the pager is 0.5f, that means the targetPage
           // state only changes after reaching half way point. We instead want it to scale
           // as we start swiping.
@@ -244,19 +229,18 @@ internal fun ReaderScreen(
           // Instead of using EPSILON for snap threshold, we are doing that calculation
           // as the page offset changes
           //
-          val currentItem = readerPost
           val fromItem =
             if (offset < -EPSILON) {
-              posts[pagerState.settledPage - 1]
+              runCatching { posts.peek(settledPage - 1) }.getOrNull()
             } else {
-              currentItem
+              activePost
             }
 
           val toItem =
             if (offset > EPSILON) {
-              posts[pagerState.settledPage + 1]
+              runCatching { posts.peek(settledPage + 1) }.getOrNull()
             } else {
-              currentItem
+              activePost
             }
 
           val fromSeedColor =
@@ -282,6 +266,8 @@ internal fun ReaderScreen(
     LocalUriHandler provides readerLinkHandler
   ) {
     val snackbarHostState = remember { SnackbarHostState() }
+    val scrollBehaviour = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
+
     AppTheme(useDarkTheme = darkTheme) {
       Scaffold(
         modifier = modifier.fillMaxSize().nestedScroll(scrollBehaviour.nestedScrollConnection),
@@ -312,20 +298,20 @@ internal fun ReaderScreen(
               }
             },
             title = {
-              val pageIndicatorState = remember {
-                object : PageIndicatorState {
-                  override val pageOffset: Float
-                    get() = pagerState.currentPageOffsetFraction
-
-                  override val selectedPage: Int
-                    get() = pagerState.currentPage
-
-                  override val pageCount: Int
-                    get() = pagerState.pageCount
-                }
-              }
-
               if (pagerState.pageCount > 1) {
+                val pageIndicatorState = remember {
+                  object : PageIndicatorState {
+                    override val pageOffset: Float
+                      get() = pagerState.currentPageOffsetFraction
+
+                    override val selectedPage: Int
+                      get() = pagerState.currentPage
+
+                    override val pageCount: Int
+                      get() = pagerState.pageCount
+                  }
+                }
+
                 HorizontalPageIndicators(
                   pageIndicatorState = pageIndicatorState,
                 )
@@ -336,11 +322,11 @@ internal fun ReaderScreen(
         bottomBar = {
           val readerPost =
             try {
-              posts[pagerState.settledPage]
+              posts.peek(pagerState.settledPage)
             } catch (e: IndexOutOfBoundsException) {
               null
             }
-          val comingSoonString = LocalStrings.current.comingSoon
+          val comingSoonString = stringResource(Res.string.comingSoon)
 
           if (readerPost != null) {
             BottomBar(
@@ -374,12 +360,23 @@ internal fun ReaderScreen(
             Highlights.Builder().theme(SyntaxThemes.atom(darkMode = darkTheme))
           }
 
+        LaunchedEffect(pagerState, posts.loadState) {
+          snapshotFlow { pagerState.settledPage }
+            .distinctUntilChanged()
+            .collectLatest { page ->
+              val readerPost = runCatching { posts.peek(page) }.getOrNull()
+
+              if (readerPost != null) {
+                presenter.dispatch(ReaderEvent.PostPageChanged(page, readerPost))
+              }
+            }
+        }
+
         HorizontalPager(
           modifier = modifier,
           state = pagerState,
-          key = posts.itemKey { it.id },
-          beyondViewportPageCount = 1,
           overscrollEffect = null,
+          beyondViewportPageCount = 1,
           contentPadding =
             PaddingValues(
               start = paddingValues.calculateStartPadding(layoutDirection),
@@ -441,7 +438,7 @@ private fun ReaderPage(
           referenceLinkHandler = ReferenceLinkHandlerImpl(),
         )
 
-      MarkdownState(input)
+      MarkdownStateImpl(input)
     }
 
   LaunchedEffect(parsedMarkdownState) { parsedMarkdownState.parse() }
@@ -469,83 +466,95 @@ private fun ReaderPage(
     )
   }
 
-  Box(modifier = modifier) {
-    // Dummy view to parse the reader content using JS
-    ReaderWebView(
-      modifier = Modifier.requiredSize(0.dp),
-      link = readerPost.link,
-      content = readerPost.rawContent ?: readerPost.description,
-      postImage = readerPost.imageUrl,
-      fetchFullArticle = loadFullArticle,
-      contentLoaded = {
-        readerProcessingProgress = ReaderProcessingProgress.Idle
-        parsedContent = json.decodeFromString(it)
-      },
-    )
+  SelectionContainer {
+    Box(modifier = modifier) {
+      // Dummy view to parse the reader content using JS
+      ReaderWebView(
+        modifier = Modifier.requiredSize(0.dp),
+        link = readerPost.link,
+        content = readerPost.rawContent ?: readerPost.description,
+        postImage = readerPost.imageUrl,
+        fetchFullArticle = loadFullArticle,
+        contentLoaded = {
+          readerProcessingProgress = ReaderProcessingProgress.Idle
+          parsedContent = json.decodeFromString(it)
+        },
+      )
 
-    CompositionLocalProvider(
-      LocalReferenceLinkHandler provides markdownState.referenceLinkHandler,
-      LocalMarkdownPadding provides markdownPadding(),
-      LocalMarkdownDimens provides markdownDimens(),
-      LocalImageTransformer provides CoilMarkdownTransformer,
-      LocalMarkdownAnnotator provides markdownAnnotator(),
-      LocalMarkdownExtendedSpans provides markdownExtendedSpans(),
-      LocalMarkdownAnimations provides markdownAnimations(),
-      LocalMarkdownColors provides markdownColor(),
-      LocalMarkdownTypography provides markdownTypography(),
-    ) {
-      LazyColumn(
-        modifier = Modifier.fillMaxSize(),
-        overscrollEffect = null,
-        contentPadding =
-          PaddingValues(
-            top = contentPaddingValues.calculateTopPadding(),
-            bottom = contentPaddingValues.calculateBottomPadding()
-          )
+      CompositionLocalProvider(
+        LocalReferenceLinkHandler provides markdownState.referenceLinkHandler,
+        LocalMarkdownPadding provides markdownPadding(),
+        LocalMarkdownDimens provides markdownDimens(),
+        LocalImageTransformer provides CoilMarkdownTransformer,
+        LocalMarkdownAnnotator provides markdownAnnotator(),
+        LocalMarkdownExtendedSpans provides markdownExtendedSpans(),
+        LocalMarkdownAnimations provides markdownAnimations(),
+        LocalMarkdownColors provides markdownColor(),
+        LocalMarkdownTypography provides
+          markdownTypography(
+            h1 = MaterialTheme.typography.displaySmall,
+            h2 = MaterialTheme.typography.headlineLarge,
+            h3 = MaterialTheme.typography.headlineMedium,
+            h4 = MaterialTheme.typography.headlineSmall,
+            h5 = MaterialTheme.typography.titleLarge,
+            h6 = MaterialTheme.typography.titleMedium,
+          ),
       ) {
-        item(key = "reader-header") {
-          PostInfo(
-            readerPost = readerPost,
-            page = page,
-            pagerState = pagerState,
-            parsedContent = parsedContent,
-            onCommentsClick = {
-              coroutineScope.launch { linkHandler.openLink(readerPost.commentsLink) }
-            },
-            onShareClick = { sharedHandler.share(readerPost.link) },
-            onBookmarkClick = onBookmarkClick
-          )
-        }
+        LazyColumn(
+          modifier = Modifier.fillMaxSize(),
+          overscrollEffect = null,
+          contentPadding =
+            PaddingValues(
+              top = contentPaddingValues.calculateTopPadding(),
+              bottom = contentPaddingValues.calculateBottomPadding()
+            )
+        ) {
+          item(key = "reader-header") {
+            PostInfo(
+              readerPost = readerPost,
+              page = page,
+              pagerState = pagerState,
+              parsedContent = parsedContent,
+              onCommentsClick = {
+                coroutineScope.launch { linkHandler.openLink(readerPost.commentsLink) }
+              },
+              onShareClick = { sharedHandler.share(readerPost.link) },
+              onBookmarkClick = onBookmarkClick
+            )
+          }
 
-        item(key = "divider") {
-          HorizontalDivider(
-            modifier = Modifier.padding(horizontal = 32.dp).padding(top = 20.dp, bottom = 24.dp),
-            color = AppTheme.colorScheme.outlineVariant
-          )
-        }
+          item(key = "divider") {
+            HorizontalDivider(
+              modifier = Modifier.padding(horizontal = 32.dp).padding(top = 20.dp, bottom = 24.dp),
+              color = AppTheme.colorScheme.outlineVariant
+            )
+          }
 
-        if (readerProcessingProgress == ReaderProcessingProgress.Loading) {
-          item(key = "progress-indicator") { ProgressIndicator() }
-        }
+          if (readerProcessingProgress == ReaderProcessingProgress.Loading) {
+            item(key = "progress-indicator") { ProgressIndicator() }
+          }
 
-        if (readerProcessingProgress == ReaderProcessingProgress.Idle || parsedContent.hasContent) {
-          if (parsedContent.hasContent) {
-            when (val state = markdownState) {
-              is State.Success -> {
-                items(items = state.node.children) { node ->
-                  Box(modifier = Modifier.padding(horizontal = 32.dp)) {
-                    handleElement(
-                      node = node,
-                      components = markdownComponents,
-                      content = state.content,
-                      includeSpacer = true,
-                      skipLinkDefinition = state.linksLookedUp,
-                    )
+          if (
+            readerProcessingProgress == ReaderProcessingProgress.Idle || parsedContent.hasContent
+          ) {
+            if (parsedContent.hasContent) {
+              when (val state = markdownState) {
+                is State.Success -> {
+                  items(items = state.node.children) { node ->
+                    Box(modifier = Modifier.padding(horizontal = 32.dp)) {
+                      handleElement(
+                        node = node,
+                        components = markdownComponents,
+                        content = state.content,
+                        includeSpacer = true,
+                        skipLinkDefinition = state.linksLookedUp,
+                      )
+                    }
                   }
                 }
-              }
-              else -> {
-                // no-op
+                else -> {
+                  // no-op
+                }
               }
             }
           }
@@ -679,7 +688,7 @@ private fun BottomBar(
 
         BottomBarIconButton(
           modifier = Modifier.padding(vertical = 12.dp),
-          label = LocalStrings.current.openWebsite,
+          label = stringResource(Res.string.openWebsite),
           icon = TwineIcons.OpenBrowser,
           onClick = openInBrowserClick,
           minWidth = buttonMinWidth
@@ -687,7 +696,7 @@ private fun BottomBar(
 
         BottomBarToggleIconButton(
           modifier = Modifier.fillMaxHeight().padding(vertical = readerViewToggleVerticalPadding),
-          label = LocalStrings.current.cdLoadFullArticle,
+          label = stringResource(Res.string.cdLoadFullArticle),
           icon = TwineIcons.ArticleShortcut,
           onClick = loadFullArticleClick,
           backgroundColor = readerViewToggleBackgroundColor,
@@ -697,7 +706,7 @@ private fun BottomBar(
 
         BottomBarIconButton(
           modifier = Modifier.padding(vertical = 12.dp),
-          label = LocalStrings.current.readerSettings,
+          label = stringResource(Res.string.readerSettings),
           icon = TwineIcons.Settings,
           onClick = openReaderViewSettings,
           minWidth = buttonMinWidth
@@ -807,20 +816,21 @@ private fun PostInfo(
       Spacer(modifier = Modifier.requiredHeight(8.dp))
     }
 
-    Text(
-      modifier = Modifier.padding(top = 20.dp),
-      text = readerPost.date.readerDateTimestamp(),
-      style = MaterialTheme.typography.bodyMedium,
-      color = AppTheme.colorScheme.outline,
-      maxLines = 1,
-    )
+    DisableSelection {
+      Text(
+        modifier = Modifier.padding(top = 20.dp),
+        text = readerPost.date.readerDateTimestamp(),
+        style = MaterialTheme.typography.bodyMedium,
+        color = AppTheme.colorScheme.outline,
+        maxLines = 1,
+      )
+    }
 
     Text(
       modifier = Modifier.padding(top = 12.dp),
       text = title.ifBlank { description },
       style = MaterialTheme.typography.headlineSmall,
       color = AppTheme.colorScheme.onSurface,
-      maxLines = 3,
       overflow = TextOverflow.Ellipsis,
     )
 
@@ -842,20 +852,22 @@ private fun PostInfo(
       val showFeedFavIcon = LocalShowFeedFavIconSetting.current
       val feedIconUrl = if (showFeedFavIcon) readerPost.feedHomepageLink else readerPost.feedIcon
 
-      PostSourcePill(
-        modifier = Modifier.weight(1f).clearAndSetSemantics {},
-        feedName = readerPost.feedName,
-        feedIcon = feedIconUrl,
-        config =
-          PostMetadataConfig(
-            showUnreadIndicator = false,
-            showToggleReadUnreadOption = true,
-            enablePostSource = false
-          ),
-        onSourceClick = {
-          // no-op
-        },
-      )
+      DisableSelection {
+        PostSourcePill(
+          modifier = Modifier.weight(1f).clearAndSetSemantics {},
+          feedName = readerPost.feedName,
+          feedIcon = feedIconUrl,
+          config =
+            PostMetadataConfig(
+              showUnreadIndicator = false,
+              showToggleReadUnreadOption = true,
+              enablePostSource = false
+            ),
+          onSourceClick = {
+            // no-op
+          },
+        )
+      }
 
       PostOptionsButtonRow(
         postBookmarked = readerPost.bookmarked,
@@ -930,7 +942,7 @@ private fun PostOptionsButtonRow(
 ) {
   Row(modifier = Modifier.semantics { isTraversalGroup = true }) {
     if (!commentsLink.isNullOrBlank()) {
-      val commentsLabel = LocalStrings.current.comments
+      val commentsLabel = stringResource(Res.string.comments)
       PostOptionIconButton(
         modifier =
           Modifier.semantics {
@@ -943,7 +955,7 @@ private fun PostOptionsButtonRow(
       )
     }
 
-    val sharedLabel = LocalStrings.current.share
+    val sharedLabel = stringResource(Res.string.share)
     PostOptionIconButton(
       modifier =
         Modifier.semantics {
@@ -957,9 +969,9 @@ private fun PostOptionsButtonRow(
 
     val bookmarkLabel =
       if (postBookmarked) {
-        LocalStrings.current.unBookmark
+        stringResource(Res.string.unBookmark)
       } else {
-        LocalStrings.current.bookmark
+        stringResource(Res.string.bookmark)
       }
     PostOptionIconButton(
       modifier =

@@ -22,32 +22,26 @@ import app.cash.paging.createPagingConfig
 import com.arkivanov.decompose.ComponentContext
 import com.arkivanov.essenty.instancekeeper.InstanceKeeper
 import com.arkivanov.essenty.instancekeeper.getOrCreate
-import com.arkivanov.essenty.lifecycle.doOnDestroy
-import dev.sasikanth.rss.reader.core.model.local.Feed
-import dev.sasikanth.rss.reader.core.model.local.FeedGroup
 import dev.sasikanth.rss.reader.core.model.local.PostWithMetadata
-import dev.sasikanth.rss.reader.core.model.local.PostsType
 import dev.sasikanth.rss.reader.core.model.local.SearchSortOrder
-import dev.sasikanth.rss.reader.core.model.local.Source
-import dev.sasikanth.rss.reader.data.repository.ObservableActiveSource
 import dev.sasikanth.rss.reader.data.repository.RssRepository
-import dev.sasikanth.rss.reader.data.repository.SettingsRepository
-import dev.sasikanth.rss.reader.reader.ReaderScreenArgs.FromScreen.*
+import dev.sasikanth.rss.reader.posts.AllPostsPager
+import dev.sasikanth.rss.reader.reader.ReaderScreenArgs.FromScreen.Bookmarks
+import dev.sasikanth.rss.reader.reader.ReaderScreenArgs.FromScreen.Home
+import dev.sasikanth.rss.reader.reader.ReaderScreenArgs.FromScreen.Search
 import dev.sasikanth.rss.reader.util.DispatchersProvider
-import dev.sasikanth.rss.reader.utils.getLast24HourStart
-import dev.sasikanth.rss.reader.utils.getTodayStartInstant
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.flow.firstOrNull
+import kotlinx.coroutines.flow.launchIn
+import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import kotlinx.datetime.Clock
-import kotlinx.datetime.Instant
 import kotlinx.serialization.Serializable
 import me.tatarka.inject.annotations.Assisted
 import me.tatarka.inject.annotations.Inject
@@ -56,11 +50,10 @@ import me.tatarka.inject.annotations.Inject
 class ReaderPresenter(
   dispatchersProvider: DispatchersProvider,
   private val rssRepository: RssRepository,
-  private val settingsRepository: SettingsRepository,
-  private val observableActiveSource: ObservableActiveSource,
+  private val allPostsPager: AllPostsPager,
   @Assisted private val readerScreenArgs: ReaderScreenArgs,
   @Assisted componentContext: ComponentContext,
-  @Assisted private val goBack: () -> Unit
+  @Assisted private val goBack: (activePostIndex: Int) -> Unit
 ) : ComponentContext by componentContext {
 
   private val presenterInstance =
@@ -69,20 +62,15 @@ class ReaderPresenter(
         dispatchersProvider = dispatchersProvider,
         readerScreenArgs = readerScreenArgs,
         rssRepository = rssRepository,
-        settingsRepository = settingsRepository,
-        observableActiveSource = observableActiveSource,
+        allPostsPager = allPostsPager,
       )
     }
 
   internal val state = presenterInstance.state
 
-  init {
-    lifecycle.doOnDestroy { dispatch(ReaderEvent.MarkOpenedPostsAsRead) }
-  }
-
   fun dispatch(event: ReaderEvent) {
     when (event) {
-      ReaderEvent.BackClicked -> goBack()
+      ReaderEvent.BackClicked -> goBack(state.value.activePostIndex)
       else -> {
         // no-op
       }
@@ -95,19 +83,23 @@ class ReaderPresenter(
     dispatchersProvider: DispatchersProvider,
     private val rssRepository: RssRepository,
     private val readerScreenArgs: ReaderScreenArgs,
-    private val settingsRepository: SettingsRepository,
-    private val observableActiveSource: ObservableActiveSource,
+    private val allPostsPager: AllPostsPager,
   ) : InstanceKeeper.Instance {
 
     private val coroutineScope = CoroutineScope(SupervisorJob() + dispatchersProvider.main)
     private val openedPostItems = mutableSetOf<String>()
 
-    private val _state = MutableStateFlow(ReaderState.default(readerScreenArgs.postIndex))
+    private val defaultReaderState =
+      ReaderState.default(
+        initialPostIndex = readerScreenArgs.postIndex,
+        initialPostId = readerScreenArgs.postId
+      )
+    private val _state = MutableStateFlow(defaultReaderState)
     val state: StateFlow<ReaderState> =
       _state.stateIn(
         scope = coroutineScope,
         started = SharingStarted.WhileSubscribed(5000),
-        initialValue = ReaderState.default(readerScreenArgs.postIndex)
+        initialValue = defaultReaderState
       )
 
     init {
@@ -121,8 +113,7 @@ class ReaderPresenter(
         }
         is ReaderEvent.TogglePostBookmark ->
           togglePostBookmark(event.postId, event.currentBookmarkStatus)
-        is ReaderEvent.PostPageChanged -> postPageChange(event.post)
-        ReaderEvent.MarkOpenedPostsAsRead -> markPostsAsRead()
+        is ReaderEvent.PostPageChanged -> postPageChange(event.postIndex, event.post)
         is ReaderEvent.LoadFullArticleClicked -> loadFullArticleClicked(event.postId)
         is ReaderEvent.PostLoaded -> postLoaded(event.post)
       }
@@ -143,8 +134,9 @@ class ReaderPresenter(
       }
     }
 
-    private fun postPageChange(post: PostWithMetadata) {
+    private fun postPageChange(postIndex: Int, post: PostWithMetadata) {
       openedPostItems += post.id
+      _state.update { it.copy(activePostIndex = postIndex, activePostId = post.id) }
     }
 
     private fun loadFullArticleClicked(postId: String) {
@@ -162,87 +154,59 @@ class ReaderPresenter(
       }
     }
 
-    private fun markPostsAsRead() {
-      coroutineScope.launch { rssRepository.markPostsAsRead(openedPostItems) }
+    private fun markPostsAsRead(): Job {
+      return coroutineScope.launch { rssRepository.markPostsAsRead(openedPostItems) }
     }
 
     private fun init() {
       coroutineScope.launch {
-        val currentTime = Clock.System.now()
-        val activeSource = observableActiveSource.activeSource.firstOrNull()
-        val postsType = settingsRepository.postsType.first()
-
-        val unreadOnly = getUnreadOnly(postsType)
-        val postsAfter = getPostsAfter(postsType)
-        val activeSourceIds = activeSourceIds(activeSource)
-
-        val posts =
-          createPager(
-              config =
-                createPagingConfig(
-                  pageSize = 4,
-                  enablePlaceholders = false,
-                ),
-              initialKey = readerScreenArgs.postIndex
-            ) {
-              when (readerScreenArgs.fromScreen) {
-                Home -> {
-                  rssRepository.allPosts(
-                    activeSourceIds = activeSourceIds,
-                    unreadOnly = unreadOnly,
-                    after = postsAfter,
-                    lastSyncedAt = currentTime,
-                  )
-                }
-                is Search -> {
-                  rssRepository.search(
-                    searchQuery = readerScreenArgs.fromScreen.searchQuery,
-                    sortOrder = readerScreenArgs.fromScreen.sortOrder,
-                  )
-                }
-                Bookmarks -> {
-                  rssRepository.bookmarks()
+        if (readerScreenArgs.fromScreen == Home) {
+          allPostsPager.allPostsPagingData
+            .onEach { postsPagingData -> _state.update { it.copy(posts = postsPagingData) } }
+            .launchIn(coroutineScope)
+        } else {
+          val posts =
+            createPager(
+                config =
+                  createPagingConfig(
+                    pageSize = 4,
+                    enablePlaceholders = true,
+                  ),
+                initialKey = readerScreenArgs.postIndex,
+              ) {
+                when (readerScreenArgs.fromScreen) {
+                  is Search -> {
+                    rssRepository.search(
+                      searchQuery = readerScreenArgs.fromScreen.searchQuery,
+                      sortOrder = readerScreenArgs.fromScreen.sortOrder,
+                    )
+                  }
+                  Bookmarks -> {
+                    rssRepository.bookmarks()
+                  }
+                  else -> {
+                    throw IllegalArgumentException(
+                      "Unknown from screen: ${readerScreenArgs.fromScreen}"
+                    )
+                  }
                 }
               }
-            }
-            .flow
-            .cachedIn(coroutineScope)
+              .flow
+              .cachedIn(coroutineScope)
 
-        _state.update { it.copy(posts = posts) }
+          _state.update { it.copy(posts = posts) }
+        }
       }
     }
-
-    private fun getPostsAfter(postsType: PostsType) =
-      when (postsType) {
-        PostsType.ALL,
-        PostsType.UNREAD -> Instant.DISTANT_PAST
-        PostsType.TODAY -> {
-          getTodayStartInstant()
-        }
-        PostsType.LAST_24_HOURS -> {
-          getLast24HourStart()
-        }
-      }
-
-    private fun getUnreadOnly(postsType: PostsType) =
-      when (postsType) {
-        PostsType.ALL,
-        PostsType.TODAY,
-        PostsType.LAST_24_HOURS -> null
-        PostsType.UNREAD -> true
-      }
-
-    private fun activeSourceIds(activeSource: Source?) =
-      when (activeSource) {
-        is Feed -> listOf(activeSource.id)
-        is FeedGroup -> activeSource.feedIds
-        else -> emptyList()
-      }
 
     private fun togglePostBookmark(postId: String, currentBookmarkStatus: Boolean) {
       coroutineScope.launch {
         rssRepository.updateBookmarkStatus(bookmarked = !currentBookmarkStatus, id = postId)
       }
+    }
+
+    override fun onDestroy() {
+      markPostsAsRead().invokeOnCompletion { coroutineScope.cancel() }
     }
   }
 }
@@ -251,12 +215,13 @@ internal typealias ReaderPresenterFactory =
   (
     args: ReaderScreenArgs,
     ComponentContext,
-    goBack: () -> Unit,
+    goBack: (activePostIndex: Int) -> Unit,
   ) -> ReaderPresenter
 
 @Serializable
 data class ReaderScreenArgs(
   val postIndex: Int,
+  val postId: String,
   val fromScreen: FromScreen,
 ) {
 

@@ -58,8 +58,8 @@ class ReaderApplication : Application(), Configuration.Provider {
                   FeedsRefreshWorker(
                     context = appContext,
                     workerParameters = workerParameters,
-                    rssRepository = appComponent.rssRepository,
-                    lastUpdatedAt = appComponent.lastUpdatedAt,
+                    syncCoordinator = appComponent.syncCoordinator,
+                    lastRefreshedAt = appComponent.lastRefreshedAt,
                     settingsRepository = appComponent.settingsRepository,
                   )
                 }

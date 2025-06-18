@@ -78,7 +78,6 @@ kotlin {
       api(projects.core.network)
       api(projects.core.data)
 
-      implementation(projects.resources.strings)
       implementation(projects.resources.icons)
 
       implementation(libs.bundles.compose)
@@ -119,8 +118,6 @@ kotlin {
       implementation(libs.markdown.coil)
       implementation(libs.markdown.code)
       implementation(libs.shadow)
-      implementation(libs.haze)
-      implementation(libs.haze.materials)
     }
     commonTest.dependencies {
       implementation(libs.kotlin.test)

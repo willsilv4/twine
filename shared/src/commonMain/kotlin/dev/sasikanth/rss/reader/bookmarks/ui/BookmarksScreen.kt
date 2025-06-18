@@ -49,16 +49,20 @@ import androidx.compose.ui.unit.dp
 import app.cash.paging.compose.collectAsLazyPagingItems
 import dev.sasikanth.rss.reader.bookmarks.BookmarksEvent
 import dev.sasikanth.rss.reader.bookmarks.BookmarksPresenter
-import dev.sasikanth.rss.reader.components.CompactFloatingActionButton
+import dev.sasikanth.rss.reader.components.NewArticlesScrollToTopButton
 import dev.sasikanth.rss.reader.home.ui.PostListItem
 import dev.sasikanth.rss.reader.home.ui.PostMetadataConfig
 import dev.sasikanth.rss.reader.platform.LocalLinkHandler
 import dev.sasikanth.rss.reader.resources.icons.ArrowBack
 import dev.sasikanth.rss.reader.resources.icons.Bookmarks
 import dev.sasikanth.rss.reader.resources.icons.TwineIcons
-import dev.sasikanth.rss.reader.resources.strings.LocalStrings
 import dev.sasikanth.rss.reader.ui.AppTheme
 import kotlinx.coroutines.launch
+import org.jetbrains.compose.resources.stringResource
+import twine.shared.generated.resources.Res
+import twine.shared.generated.resources.bookmarks
+import twine.shared.generated.resources.bookmarksPlaceholder
+import twine.shared.generated.resources.buttonGoBack
 
 @Composable
 internal fun BookmarksScreen(
@@ -78,10 +82,13 @@ internal fun BookmarksScreen(
     topBar = {
       Box {
         CenterAlignedTopAppBar(
-          title = { Text(LocalStrings.current.bookmarks) },
+          title = { Text(stringResource(Res.string.bookmarks)) },
           navigationIcon = {
             IconButton(onClick = { bookmarksPresenter.dispatch(BookmarksEvent.BackClicked) }) {
-              Icon(TwineIcons.ArrowBack, contentDescription = LocalStrings.current.buttonGoBack)
+              Icon(
+                TwineIcons.ArrowBack,
+                contentDescription = stringResource(Res.string.buttonGoBack)
+              )
             }
           },
           colors =
@@ -149,14 +156,15 @@ internal fun BookmarksScreen(
             }
           }
 
-          CompactFloatingActionButton(
-            label = LocalStrings.current.scrollToTop,
-            visible = showScrollToTop,
+          NewArticlesScrollToTopButton(
+            unreadSinceLastSync = null,
+            canShowScrollToTop = true,
             modifier =
               Modifier.padding(
                 end = padding.calculateEndPadding(layoutDirection) + 16.dp,
                 bottom = padding.calculateBottomPadding() + 16.dp
-              )
+              ),
+            onLoadNewArticlesClick = {}
           ) {
             listState.animateScrollToItem(0)
           }
@@ -174,7 +182,7 @@ internal fun BookmarksScreen(
             Spacer(Modifier.requiredHeight(16.dp))
 
             Text(
-              text = LocalStrings.current.bookmarksPlaceholder,
+              text = stringResource(Res.string.bookmarksPlaceholder),
               style = MaterialTheme.typography.labelLarge,
               color = AppTheme.colorScheme.textEmphasisMed
             )

@@ -17,7 +17,6 @@
 package dev.sasikanth.rss.reader.components
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
@@ -42,29 +41,15 @@ internal fun DropdownMenu(
   offset: DpOffset = DpOffset.Zero,
   content: @Composable ColumnScope.() -> Unit
 ) {
-  MaterialTheme(
-    colorScheme =
-      MaterialTheme.colorScheme.copy(surface = AppTheme.colorScheme.surfaceContainerLowest),
-    shapes = MaterialTheme.shapes.copy(extraSmall = MaterialTheme.shapes.large)
-  ) {
-    androidx.compose.material3.DropdownMenu(
-      expanded = expanded,
-      onDismissRequest = onDismissRequest,
-      offset = offset,
-      modifier =
-        modifier
-          .background(
-            color = AppTheme.colorScheme.surfaceContainerLowest,
-            shape = MaterialTheme.shapes.large
-          )
-          .border(
-            width = 1.dp,
-            color = AppTheme.colorScheme.outlineVariant,
-            shape = MaterialTheme.shapes.large
-          ),
-      content = content
-    )
-  }
+  androidx.compose.material3.DropdownMenu(
+    expanded = expanded,
+    onDismissRequest = onDismissRequest,
+    offset = offset,
+    shape = MaterialTheme.shapes.extraLarge,
+    modifier =
+      modifier.background(color = AppTheme.colorScheme.surface, shape = MaterialTheme.shapes.large),
+    content = content
+  )
 }
 
 @Composable
@@ -73,24 +58,38 @@ internal fun DropdownMenuItem(
   modifier: Modifier = Modifier,
   leadingIcon: (@Composable () -> Unit)? = null,
   contentDescription: String? = null,
+  enabled: Boolean = true,
   text: @Composable () -> Unit,
 ) {
   Row(
     modifier =
       modifier
-        .clickable(onClickLabel = contentDescription, onClick = onClick)
-        .padding(vertical = 12.dp)
-        .padding(start = 16.dp, end = 20.dp)
+        .clickable(onClickLabel = contentDescription, enabled = enabled, onClick = onClick)
+        .padding(vertical = 12.dp, horizontal = 20.dp)
         .fillMaxWidth()
   ) {
-    CompositionLocalProvider(LocalContentColor provides AppTheme.colorScheme.onSurface) {
+    val contentColor =
+      if (enabled) {
+        AppTheme.colorScheme.onSurface
+      } else {
+        AppTheme.colorScheme.onSurface.copy(alpha = 0.38f)
+      }
+    val iconColor =
+      if (enabled) {
+        AppTheme.colorScheme.onSurfaceVariant
+      } else {
+        AppTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.38f)
+      }
+
+    CompositionLocalProvider(LocalContentColor provides iconColor) {
       if (leadingIcon != null) {
         leadingIcon()
-        Spacer(Modifier.width(12.dp))
+        Spacer(Modifier.width(16.dp))
       } else {
         Spacer(Modifier.width(4.dp))
       }
-      text()
     }
+
+    CompositionLocalProvider(LocalContentColor provides contentColor) { text() }
   }
 }

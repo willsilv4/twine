@@ -32,7 +32,6 @@ import coil3.compose.setSingletonImageLoaderFactory
 import com.arkivanov.decompose.ExperimentalDecomposeApi
 import com.arkivanov.decompose.extensions.compose.experimental.stack.ChildStack
 import com.arkivanov.decompose.extensions.compose.experimental.stack.animation.StackAnimation
-import com.arkivanov.decompose.extensions.compose.experimental.stack.animation.plus
 import com.arkivanov.decompose.extensions.compose.subscribeAsState
 import com.arkivanov.essenty.backhandler.BackHandler
 import dev.sasikanth.rss.reader.about.ui.AboutScreen
@@ -40,6 +39,7 @@ import dev.sasikanth.rss.reader.addfeed.ui.AddFeedScreen
 import dev.sasikanth.rss.reader.blockedwords.BlockedWordsScreen
 import dev.sasikanth.rss.reader.bookmarks.ui.BookmarksScreen
 import dev.sasikanth.rss.reader.data.repository.AppThemeMode
+import dev.sasikanth.rss.reader.data.repository.HomeViewMode
 import dev.sasikanth.rss.reader.feed.ui.FeedInfoBottomSheet
 import dev.sasikanth.rss.reader.group.ui.GroupScreen
 import dev.sasikanth.rss.reader.groupselection.ui.GroupSelectionSheet
@@ -48,7 +48,6 @@ import dev.sasikanth.rss.reader.placeholder.PlaceholderScreen
 import dev.sasikanth.rss.reader.platform.LinkHandler
 import dev.sasikanth.rss.reader.platform.LocalLinkHandler
 import dev.sasikanth.rss.reader.reader.ui.ReaderScreen
-import dev.sasikanth.rss.reader.resources.strings.ProvideStrings
 import dev.sasikanth.rss.reader.search.ui.SearchScreen
 import dev.sasikanth.rss.reader.settings.ui.SettingsScreen
 import dev.sasikanth.rss.reader.share.LocalShareHandler
@@ -117,87 +116,91 @@ fun App(
 
     LaunchedEffect(useDarkTheme) { onThemeChange(useDarkTheme) }
 
-    AppTheme(useDarkTheme = useDarkTheme) {
-      ProvideStrings {
-        ChildStack(
-          modifier = Modifier.fillMaxSize(),
-          stack = appPresenter.screenStack,
-          animation =
-            backAnimation(
-              backHandler = appPresenter.backHandler,
-              onBack = appPresenter::onBackClicked
-            )
-        ) { child ->
-          val fillMaxSizeModifier = Modifier.fillMaxSize()
-          when (val screen = child.instance) {
-            Screen.Placeholder -> {
-              PlaceholderScreen(modifier = fillMaxSizeModifier)
-            }
-            is Screen.Home -> {
-              HomeScreen(
-                homePresenter = screen.presenter,
-                useDarkTheme = useDarkTheme,
-                modifier = fillMaxSizeModifier,
-                onBottomSheetStateChanged = { sheetValue ->
-                  val showDarkStatusBar =
-                    if (sheetValue == SheetValue.Expanded) {
-                      true
-                    } else {
-                      useDarkTheme
-                    }
+    LaunchedEffect(appState.homeViewMode) {
+      if (appState.homeViewMode != HomeViewMode.Default) {
+        dynamicColorState.reset()
+      }
+    }
 
-                  toggleLightStatusBar(showDarkStatusBar.not())
-                },
-                onBottomSheetHidden = { isHidden -> toggleLightNavBar(isHidden) },
-              )
-            }
-            is Screen.Reader -> {
-              ReaderScreen(
-                darkTheme = useDarkTheme,
-                presenter = screen.presenter,
-                modifier = fillMaxSizeModifier
-              )
-            }
-            is Screen.Search -> {
-              SearchScreen(searchPresenter = screen.presenter, modifier = fillMaxSizeModifier)
-            }
-            is Screen.Bookmarks -> {
-              BookmarksScreen(bookmarksPresenter = screen.presenter, modifier = fillMaxSizeModifier)
-            }
-            is Screen.Settings -> {
-              SettingsScreen(settingsPresenter = screen.presenter, modifier = fillMaxSizeModifier)
-            }
-            is Screen.About -> {
-              AboutScreen(aboutPresenter = screen.presenter, modifier = fillMaxSizeModifier)
-            }
-            is Screen.AddFeed -> {
-              AppTheme(useDarkTheme = true) {
-                AddFeedScreen(presenter = screen.presenter, modifier = fillMaxSizeModifier)
-              }
-            }
-            is Screen.GroupDetails -> {
-              AppTheme(useDarkTheme = true) {
-                GroupScreen(presenter = screen.presenter, modifier = fillMaxSizeModifier)
-              }
-            }
-            is Screen.BlockedWords -> {
-              BlockedWordsScreen(
-                modifier = fillMaxSizeModifier,
-                presenter = screen.presenter,
-              )
+    AppTheme(useDarkTheme = useDarkTheme) {
+      ChildStack(
+        modifier = Modifier.fillMaxSize(),
+        stack = appPresenter.screenStack,
+        animation =
+          backAnimation(
+            backHandler = appPresenter.backHandler,
+            onBack = appPresenter::onBackClicked
+          )
+      ) { child ->
+        val fillMaxSizeModifier = Modifier.fillMaxSize()
+        when (val screen = child.instance) {
+          Screen.Placeholder -> {
+            PlaceholderScreen(modifier = fillMaxSizeModifier)
+          }
+          is Screen.Home -> {
+            HomeScreen(
+              homePresenter = screen.presenter,
+              useDarkTheme = useDarkTheme,
+              modifier = fillMaxSizeModifier,
+              onBottomSheetStateChanged = { sheetValue ->
+                val showDarkStatusBar =
+                  if (sheetValue == SheetValue.Expanded) {
+                    true
+                  } else {
+                    useDarkTheme
+                  }
+
+                toggleLightStatusBar(showDarkStatusBar.not())
+              },
+              onBottomSheetHidden = { isHidden -> toggleLightNavBar(isHidden) },
+            )
+          }
+          is Screen.Reader -> {
+            ReaderScreen(
+              darkTheme = useDarkTheme,
+              presenter = screen.presenter,
+              modifier = fillMaxSizeModifier
+            )
+          }
+          is Screen.Search -> {
+            SearchScreen(searchPresenter = screen.presenter, modifier = fillMaxSizeModifier)
+          }
+          is Screen.Bookmarks -> {
+            BookmarksScreen(bookmarksPresenter = screen.presenter, modifier = fillMaxSizeModifier)
+          }
+          is Screen.Settings -> {
+            SettingsScreen(settingsPresenter = screen.presenter, modifier = fillMaxSizeModifier)
+          }
+          is Screen.About -> {
+            AboutScreen(aboutPresenter = screen.presenter, modifier = fillMaxSizeModifier)
+          }
+          is Screen.AddFeed -> {
+            AppTheme(useDarkTheme = true) {
+              AddFeedScreen(presenter = screen.presenter, modifier = fillMaxSizeModifier)
             }
           }
+          is Screen.GroupDetails -> {
+            AppTheme(useDarkTheme = true) {
+              GroupScreen(presenter = screen.presenter, modifier = fillMaxSizeModifier)
+            }
+          }
+          is Screen.BlockedWords -> {
+            BlockedWordsScreen(
+              modifier = fillMaxSizeModifier,
+              presenter = screen.presenter,
+            )
+          }
         }
+      }
 
-        val modals by appPresenter.modalStack.subscribeAsState()
-        modals.child?.instance?.also { modal ->
-          when (modal) {
-            is Modals.FeedInfo -> {
-              FeedInfoBottomSheet(feedPresenter = modal.presenter)
-            }
-            is Modals.GroupSelection -> {
-              GroupSelectionSheet(presenter = modal.presenter)
-            }
+      val modals by appPresenter.modalStack.subscribeAsState()
+      modals.child?.instance?.also { modal ->
+        when (modal) {
+          is Modals.FeedInfo -> {
+            FeedInfoBottomSheet(feedPresenter = modal.presenter)
+          }
+          is Modals.GroupSelection -> {
+            GroupSelectionSheet(presenter = modal.presenter)
           }
         }
       }
